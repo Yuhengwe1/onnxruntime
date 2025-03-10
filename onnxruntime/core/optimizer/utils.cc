@@ -410,6 +410,10 @@ bool GetScalarInitializerValue(const onnxruntime::Graph& graph, const onnxruntim
 
 template bool GetScalarInitializerValue<float>(const onnxruntime::Graph& graph, const onnxruntime::NodeArg& input_arg, float& value,
                                                bool is_constant);
+template bool GetScalarInitializerValue<int64_t>(const onnxruntime::Graph& graph, const onnxruntime::NodeArg& input_arg, int64_t& value,
+                                               bool is_constant);
+template bool GetScalarInitializerValue<int32_t>(const onnxruntime::Graph& graph, const onnxruntime::NodeArg& input_arg, int32_t& value,
+                                                bool is_constant);
 
 #endif  // #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 

@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include "core/common/logging/severity.h"
 #ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable : 4244)
@@ -21,6 +22,7 @@
 #include "core/graph/onnx_protobuf.h"
 #include "core/mlas/inc/mlas_q4.h"
 #include "core/optimizer/attention_fusion.h"
+#include "core/optimizer/gqa_attention_fusion.h"
 #include "core/optimizer/bias_dropout_fusion.h"
 #include "core/optimizer/bias_gelu_fusion.h"
 #include "core/optimizer/bias_softmax_fusion.h"
@@ -4713,6 +4715,30 @@ TEST_F(GraphTransformationTests, AttentionFusionDistilBertTest) {
   EXPECT_EQ(op_to_count["Transpose"], 0);
   EXPECT_EQ(op_to_count["Softmax"], 0);
   EXPECT_EQ(op_to_count["Shape"], 0);
+}
+
+TEST_F(GraphTransformationTests, GroupQureyAttentionFusionSeq1Test) {
+  constexpr const ORTCHAR_T* model_uri = MODEL_FOLDER "fusion/GQA_decomposed_seq_1.onnx";
+  std::shared_ptr<Model> p_model;
+  logger_->SetSeverity(Severity::kINFO);
+  ASSERT_STATUS_OK(Model::Load(model_uri, p_model, nullptr, *logger_));
+  Graph& graph = p_model->MainGraph();
+
+  onnxruntime::GraphTransformerManager graph_transformation_mgr{5};
+  ASSERT_STATUS_OK(graph_transformation_mgr.Register(std::make_unique<GroupQueryAttentionFusion>(),
+                                                     TransformerLevel::Level2));
+  ASSERT_STATUS_OK(graph_transformation_mgr.ApplyTransformers(graph, TransformerLevel::Level2, *logger_));
+
+  std::map<std::string, int> op_to_count = CountOpsInGraph(graph);
+  std::cout << "ops in graph: \n";
+  for (auto& pair : op_to_count) {
+    std::cout << pair.first << " : " << pair.second << std::endl;
+  }
+
+  // const std::string output_model_path = MODEL_FOLDER "fusion/GQA_fused_seq_1.onnx";
+  // ASSERT_STATUS_OK(Model::Save(*p_model, output_model_path));
+
+  EXPECT_EQ(op_to_count["com.microsoft.GroupQueryAttention"], 1);
 }
 
 TEST_F(GraphTransformationTests, GeluFusionTest) {
