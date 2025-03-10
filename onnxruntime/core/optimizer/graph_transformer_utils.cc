@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <variant>
 
+#include "core/graph/constants.h"
 #include "core/optimizer/conv_activation_fusion.h"
 #include "core/optimizer/matmul_nbits_fusion.h"
 #include "core/optimizer/nhwc_transformer.h"
@@ -45,6 +46,7 @@
 #include "core/optimizer/gemm_activation_fusion.h"
 #include "core/optimizer/gemm_sum_fusion.h"
 #include "core/optimizer/gemm_transpose_fusion.h"
+#include "core/optimizer/gqa_attention_fusion.h"
 #include "core/optimizer/identical_children_consolidation.h"
 #include "core/optimizer/identity_elimination.h"
 #include "core/optimizer/label_encoder_fusion.h"
@@ -261,6 +263,12 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
       // run TransposeOptimizer last as it works in a slightly different way by moving Transpose nodes around.
       // shouldn't affect the end result - just easier to debug any issue if it's last.
       transformers.emplace_back(std::make_unique<TransposeOptimizer>(std::move(cpu_allocator)));
+
+      // run GroupQueryAttentionFusion for webnn workload
+      // const InlinedHashSet<std::string_view> gqa_fusion_eps = {onnxruntime::kCpuExecutionProvider,
+      //                                                          onnxruntime::kOpenVINOExecutionProvider,
+      //                                                          onnxruntime::kWebNNExecutionProvider};
+      transformers.emplace_back(std::make_unique<GroupQueryAttentionFusion>());
     } break;
 
     case TransformerLevel::Level2: {
