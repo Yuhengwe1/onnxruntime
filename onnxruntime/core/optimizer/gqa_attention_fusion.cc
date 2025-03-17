@@ -51,6 +51,7 @@ void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<co
     std::vector<graph_utils::EdgeEndToMatch> present_kv_expand_path{
         {0, 0, "Expand", {8, 13}, kOnnxDomain},
         {0, 0, "Reshape", {5, 13, 21}, kOnnxDomain},
+        {0, 0, "ScatterND", {13, 16, 18}, kOnnxDomain},
     };
     std::vector<const Node::EdgeEnd*> result;
     if (!graph_utils::FindPath(*start_node, true, present_kv_expand_path, result,
@@ -60,6 +61,7 @@ void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<co
     node_lists.push_back(*start_node);
     node_lists.push_back(result[0]->GetNode());
     node_lists.push_back(result[1]->GetNode());
+    node_lists.push_back(result[2]->GetNode());
   }
 }
 
@@ -282,7 +284,7 @@ bool MatchAndCheckQK(Graph& graph,
                      GQAParameters& gqa_params,
                      const std::vector<const Node::EdgeEnd*>& scatter_edges,
                      std::vector<const Node::EdgeEnd*>& q_edges,
-                     std::vector<const Node::EdgeEnd*>& k_edges,
+                     std::vector<std::reference_wrapper<const Node>>& present_k_nodes,
                      const logging::Logger logger) {
   LOGS_DEFAULT(WARNING) << "Start match Q*K subgraph";
   // path to input query
@@ -328,30 +330,26 @@ bool MatchAndCheckQK(Graph& graph,
   }
 
   // path to input key
-  std::vector<graph_utils::EdgeEndToMatch> k_input_path{
-      {0, 1, "Transpose", {21}, kOnnxDomain},
-      {0, 0, "ScatterND", {18}, kOnnxDomain},
-      {0, 2, "Reshape", {21}, kOnnxDomain}};
-
-  if (!graph_utils::FindPath(qk_matmul, true, k_input_path, k_edges, logger)) {
-    LOGS_DEFAULT(WARNING) << "Faild to find k input path";
-    return false;
-  }
-
   const Node* maybe_k_transpose = graph_utils::GetInputNode(qk_matmul, 1);
   if (maybe_k_transpose == nullptr || maybe_k_transpose->OpType().compare("Transpose") != 0) {
     LOGS_DEFAULT(WARNING) << "qk_matmul input[1] mismatch";
     return false;
   }
 
-  std::vector<std::reference_wrapper<const Node>> present_k_nodes;
-  MatchKVExpand(maybe_k_transpose, present_k_nodes, logger);
-  if (present_k_nodes.empty()) {
+  const Node* k_transpose_input = graph_utils::GetInputNode(*maybe_k_transpose, 0);
+  if (k_transpose_input == nullptr) {
+    LOGS_DEFAULT(WARNING) << "empty k_transpose input";
+    return false;
+  }
+
+  std::vector<std::reference_wrapper<const Node>> present_k_scatternd_nodes;
+  MatchKVExpand(k_transpose_input, present_k_scatternd_nodes, logger);
+  if (present_k_scatternd_nodes.empty()) {
     LOGS_DEFAULT(WARNING) << "Failed to find present_k expand path";
     return false;
   }
 
-  const Node& scatterND_k = present_k_nodes.back();
+  const Node& scatterND_k = present_k_scatternd_nodes.back();
   const Node* maybe_k_reshape = graph_utils::GetInputNode(scatterND_k, 2);
   if (maybe_k_reshape == nullptr || maybe_k_reshape->OpType().compare("Reshape") != 0) {
     LOGS_DEFAULT(WARNING) << "scatterND_k input[2] mismatch";
@@ -387,8 +385,14 @@ bool MatchAndCheckQK(Graph& graph,
         k_transpose_perm.size() == 4 && k_transpose_perm[0] == 0 &&
         k_transpose_perm[1] == 1 && k_transpose_perm[2] == 3 &&
         k_transpose_perm[3] == 2)) {
+    LOGS_DEFAULT(WARNING) << "K_transpose perm not matched";
     return false;
   }
+
+  present_k_nodes.push_back(*maybe_k_transpose);
+  present_k_nodes.insert(present_k_nodes.end(), present_k_scatternd_nodes.begin(),
+                         present_k_scatternd_nodes.end());
+  present_k_nodes.push_back(*maybe_k_reshape);
 
   return true;
 }
@@ -422,7 +426,6 @@ Status GroupQueryAttentionFusion::ApplyImpl(
           matmul_input_0->OpType().compare("Softmax") != 0) {
         continue;
       }
-      // TODO(yuheng): create a pattern here to match scatter & broadcast
 
       if (matmul_input_1 == nullptr) {
         continue;
@@ -592,10 +595,10 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
 
   // match QK
   std::vector<const Node::EdgeEnd*> query_input_edges;
-  std::vector<const Node::EdgeEnd*> key_input_edges;
+  std::vector<std::reference_wrapper<const Node>> present_k_nodes;
   if (!MatchAndCheckQK(graph, *maybe_add_before_softmax, gqa_params,
                        scatter_indices_edges, query_input_edges,
-                       key_input_edges, logger)) {
+                       present_k_nodes, logger)) {
     LOGS_DEFAULT(WARNING) << "failed to match Q*K subgraph";
     return false;
   }
@@ -613,13 +616,14 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   NodeArg* total_seq_len_node_arg =
       &graph.GetOrCreateNodeArg(total_seq_length.name(), nullptr);
 
+  const Node& scatterND_k = present_k_nodes[present_k_nodes.size()-2].get();
   const std::array input_defs{
       graph.GetNode(query_input_edges[3]->GetNode().Index())
           ->MutableInputDefs()[0],
-      graph.GetNode(key_input_edges[2]->GetNode().Index())
+      graph.GetNode(present_k_nodes.back().get().Index())
           ->MutableInputDefs()[0],
       graph.GetNode(maybe_reshape->Index())->MutableInputDefs()[0],
-      graph.GetNode(key_input_edges[1]->GetNode().Index())
+      graph.GetNode(scatterND_k.Index())
           ->MutableInputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableInputDefs()[0],
       graph.GetNode(scatter_indices_edges[4]->GetNode().Index())
@@ -628,7 +632,7 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   // output list: [output, present_key, present_value]
   const std::array output_defs{
       graph.GetNode(output_edges[1]->GetNode().Index())->MutableOutputDefs()[0],
-      graph.GetNode(key_input_edges[1]->GetNode().Index())
+      graph.GetNode(scatterND_k.Index())
           ->MutableOutputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableOutputDefs()[0]};
   Node& gqa_node = graph.AddNode("GroupQueryAttention", "GroupQueryAttention",
@@ -652,6 +656,12 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
       [](std::reference_wrapper<const Node> node_ref_wrapper) -> NodeIndex {
         return node_ref_wrapper.get().Index();
       });
+  std::transform(
+      present_k_nodes.begin(), present_k_nodes.end(),
+      std::inserter(nodes_to_remove, nodes_to_remove.end()),
+      [](std::reference_wrapper<const Node> node_ref_wrapper) -> NodeIndex {
+        return node_ref_wrapper.get().Index();
+      });
   auto append_to_remove_list_from_edge =
       [&](std::vector<const Node::EdgeEnd*> edges) {
         std::transform(
@@ -663,7 +673,6 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   append_to_remove_list_from_edge(scatter_indices_edges);
   append_to_remove_list_from_edge(attention_bias_edges);
   append_to_remove_list_from_edge(query_input_edges);
-  append_to_remove_list_from_edge(key_input_edges);
 
   LOGS_DEFAULT(WARNING) << "nodes_to_remove set size: " << nodes_to_remove.size();
 
