@@ -44,11 +44,29 @@ bool ValidateReshapeShape(
   return true;
 }
 
+void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<const Node>>& node_lists, const logging::Logger& logger) {
+  if (start_node->OpType().compare("ScatterND") == 0) {
+    node_lists.push_back(*start_node);
+  } else if (start_node->OpType().compare("Reshape") == 0) {
+    std::vector<graph_utils::EdgeEndToMatch> present_kv_expand_path{
+        {0, 0, "Expand", {8, 13}, kOnnxDomain},
+        {0, 0, "Reshape", {5, 13, 21}, kOnnxDomain},
+    };
+    std::vector<const Node::EdgeEnd*> result;
+    if (!graph_utils::FindPath(*start_node, true, present_kv_expand_path, result,
+                               logger)) {
+      return;
+    }
+    node_lists.push_back(*start_node);
+    node_lists.push_back(result[0]->GetNode());
+    node_lists.push_back(result[1]->GetNode());
+  }
+}
+
 bool CheckNodesInOutputPath(Graph& graph,
                             const Node& reshape,
                             const Node& transpose,
-                            GQAParameters& gqa_params,
-                            const logging::Logger& logger) {
+                            GQAParameters& gqa_params) {
   if (!optimizer_utils::CheckOutputEdges(graph, transpose, 1)) {
     LOGS_DEFAULT(WARNING) << "Output edge count not expected for Transpose in "
                              "output path, expected 1, got "
@@ -94,7 +112,7 @@ scatter_indices_left_constant             scatter_indices_right_constant        
 bool MatchAndCheckScatterIndicesCalculation(
     Graph& graph,
     const Node& scatterND,
-    GQAParameters& gqa_params,
+    const GQAParameters& gqa_params,
     std::vector<const Node::EdgeEnd*>& result,
     const logging::Logger logger) {
   LOGS_DEFAULT(WARNING) << "Start MatchAndCheckScatterIndicesCalculation";
@@ -141,7 +159,7 @@ bool MatchAndCheckScatterIndicesCalculation(
   int32_t where_scatter_idx_input_x_data;
   if (!optimizer_utils::GetScalarInitializerValue(
           graph, *(where.InputDefs()[1]), where_scatter_idx_input_x_data, true) ||
-          where_scatter_idx_input_x_data != 0) {
+      where_scatter_idx_input_x_data != 0) {
     LOGS_DEFAULT(WARNING) << "Where input x data not matched";
     return false;
   }
@@ -171,7 +189,7 @@ ones_array (shape=B,N,S,P)                                  range_of_qkv_sequenc
 bool MatchAndCheckAttentionBias(
     Graph& graph,
     const Node& add_before_softmax,
-    GQAParameters& gqa_params,
+    const GQAParameters& gqa_params,
     const std::vector<const Node::EdgeEnd*>& scatter_edges,
     std::vector<const Node::EdgeEnd*>& result,
     const logging::Logger logger) {
@@ -320,9 +338,25 @@ bool MatchAndCheckQK(Graph& graph,
     return false;
   }
 
-  const Node& k_transpose = k_edges[0]->GetNode();
-  const Node& scatterND_k = k_edges[1]->GetNode();
-  const Node& k_reshape = k_edges[2]->GetNode();
+  const Node* maybe_k_transpose = graph_utils::GetInputNode(qk_matmul, 1);
+  if (maybe_k_transpose == nullptr || maybe_k_transpose->OpType().compare("Transpose") != 0) {
+    LOGS_DEFAULT(WARNING) << "qk_matmul input[1] mismatch";
+    return false;
+  }
+
+  std::vector<std::reference_wrapper<const Node>> present_k_nodes;
+  MatchKVExpand(maybe_k_transpose, present_k_nodes, logger);
+  if (present_k_nodes.empty()) {
+    LOGS_DEFAULT(WARNING) << "Failed to find present_k expand path";
+    return false;
+  }
+
+  const Node& scatterND_k = present_k_nodes.back();
+  const Node* maybe_k_reshape = graph_utils::GetInputNode(scatterND_k, 2);
+  if (maybe_k_reshape == nullptr || maybe_k_reshape->OpType().compare("Reshape") != 0) {
+    LOGS_DEFAULT(WARNING) << "scatterND_k input[2] mismatch";
+    return false;
+  }
 
   if (graph_utils::GetInputNode(scatterND_k, 1)->Index() !=
       scatter_edges[0]->GetNode().Index()) {
@@ -340,15 +374,15 @@ bool MatchAndCheckQK(Graph& graph,
     return false;
   }
 
-  if (!ValidateReshapeShape(graph, *(k_reshape.InputDefs()[1]),
+  if (!ValidateReshapeShape(graph, *(maybe_k_reshape->InputDefs()[1]),
                             {gqa_params.batch_size_, gqa_params.seq_length_,
-                              gqa_params.kv_num_heads_, gqa_params.head_size_})) {
+                             gqa_params.kv_num_heads_, gqa_params.head_size_})) {
     LOGS_DEFAULT(WARNING) << "K_reshape shape not matched";
     return false;
   }
 
   InlinedVector<int64_t> k_transpose_perm;
-  if (!(graph_utils::GetRepeatedNodeAttributeValues(k_transpose, "perm",
+  if (!(graph_utils::GetRepeatedNodeAttributeValues(*maybe_k_transpose, "perm",
                                                     k_transpose_perm) &&
         k_transpose_perm.size() == 4 && k_transpose_perm[0] == 0 &&
         k_transpose_perm[1] == 1 && k_transpose_perm[2] == 3 &&
@@ -389,12 +423,15 @@ Status GroupQueryAttentionFusion::ApplyImpl(
         continue;
       }
       // TODO(yuheng): create a pattern here to match scatter & broadcast
-      if (matmul_input_1 == nullptr ||
-          matmul_input_1->OpType().compare("ScatterND") != 0) {
+
+      if (matmul_input_1 == nullptr) {
         continue;
       }
-      std::vector<std::reference_wrapper<const Node>> present_v_nodes = {
-          *matmul_input_1};
+      std::vector<std::reference_wrapper<const Node>> present_v_nodes;
+      MatchKVExpand(matmul_input_1, present_v_nodes, logger);
+      if (present_v_nodes.empty()) {
+        continue;
+      }
 
       const NodeArg& matmul_input_1_shape = *(matmul_input_1->OutputDefs()[0]);
       if (!optimizer_utils::IsShapeKnownOnAllDims(matmul_input_1_shape, 4)) {
@@ -417,7 +454,7 @@ Status GroupQueryAttentionFusion::ApplyImpl(
   }
 
   LOGS_DEFAULT(WARNING) << "Total fused GroupQueryAttention node count: "
-                     << fuse_count;
+                        << fuse_count;
 
   return Status::OK();
 }
@@ -493,12 +530,12 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   }
 
   if (!CheckNodesInOutputPath(graph, output_edges[1]->GetNode(),
-                              output_edges[0]->GetNode(), gqa_params, logger)) {
+                              output_edges[0]->GetNode(), gqa_params)) {
     return false;
   }
 
   // check past_value and input value
-  const Node& scatterND_v = present_v_nodes[0];
+  const Node& scatterND_v = present_v_nodes.back();
   const Node* maybe_reshape = graph_utils::GetInputNode(scatterND_v, 2);
   if (maybe_reshape == nullptr ||
       maybe_reshape->OpType().compare("Reshape") != 0) {
