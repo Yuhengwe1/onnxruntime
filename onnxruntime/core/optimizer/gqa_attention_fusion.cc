@@ -616,18 +616,14 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   NodeArg* total_seq_len_node_arg =
       &graph.GetOrCreateNodeArg(total_seq_length.name(), nullptr);
 
-  const Node& scatterND_k = present_k_nodes[present_k_nodes.size()-2].get();
+  const Node& scatterND_k = present_k_nodes[present_k_nodes.size() - 2].get();
   const std::array input_defs{
-      graph.GetNode(query_input_edges[3]->GetNode().Index())
-          ->MutableInputDefs()[0],
-      graph.GetNode(present_k_nodes.back().get().Index())
-          ->MutableInputDefs()[0],
+      graph.GetNode(query_input_edges[3]->GetNode().Index())->MutableInputDefs()[0],
+      graph.GetNode(present_k_nodes.back().get().Index())->MutableInputDefs()[0],
       graph.GetNode(maybe_reshape->Index())->MutableInputDefs()[0],
-      graph.GetNode(scatterND_k.Index())
-          ->MutableInputDefs()[0],
+      graph.GetNode(scatterND_k.Index())->MutableInputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableInputDefs()[0],
-      graph.GetNode(scatter_indices_edges[4]->GetNode().Index())
-          ->MutableInputDefs()[2],
+      graph.GetNode(scatter_indices_edges[4]->GetNode().Index())->MutableInputDefs()[2],
       total_seq_len_node_arg};
   // output list: [output, present_key, present_value]
   const std::array output_defs{
