@@ -289,7 +289,7 @@ bool MatchAndCheckQK(Graph& graph,
   LOGS_DEFAULT(WARNING) << "Start match Q*K subgraph";
   // path to input query
   std::vector<graph_utils::EdgeEndToMatch> q_input_path{
-      {0, 0, "Div", {14}, kOnnxDomain},
+      {0, 0, "Mul", {14}, kOnnxDomain},
       {0, 0, "MatMul", {13}, kOnnxDomain},
       {0, 0, "Transpose", {21}, kOnnxDomain},
       {0, 0, "Reshape", {21}, kOnnxDomain}};
@@ -300,13 +300,13 @@ bool MatchAndCheckQK(Graph& graph,
     return false;
   }
 
-  const Node& div = q_edges[0]->GetNode();
+  const Node& mul = q_edges[0]->GetNode();
   const Node& qk_matmul = q_edges[1]->GetNode();
   const Node& q_transpose = q_edges[2]->GetNode();
   const Node& q_reshape = q_edges[3]->GetNode();
 
   float scale_data;
-  if (!optimizer_utils::GetScalarInitializerValue(graph, *(div.InputDefs()[1]),
+  if (!optimizer_utils::GetScalarInitializerValue(graph, *(mul.InputDefs()[1]),
                                                   scale_data, true)) {
     LOGS_DEFAULT(WARNING) << "failed to get scale value";
     return false;
@@ -489,7 +489,7 @@ present_key<---\----ScatterND <---------|-----(scatter_indices*)    |
                   \   |     past_value  |   /                       |
                 qk_MatMul          \    |  /                        |
                       |            ScatterND-----> present_value    |
-                  qk_Div              /                             |
+                  qk_Mul              /                             |
                       |              /                              |
                      Add <----------/--------(attention_bias, one/finfo_min mask*)
                       |            /
