@@ -32,7 +32,8 @@ class GroupQueryAttentionFusion : public GraphTransformer {
       const Node& softmax,
       std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
       GQAParameters& gqa_params,
-      const logging::Logger& logger);
+      const logging::Logger& logger,
+      int fuse_count);
 };
 
 }  // namespace onnxruntime

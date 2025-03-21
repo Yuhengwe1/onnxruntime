@@ -449,7 +449,7 @@ Status GroupQueryAttentionFusion::ApplyImpl(
 
       if (GroupQueryAttentionFusion::FuseSubGraph(graph, node, *matmul_input_0,
                                                   present_v_nodes, gqa_params,
-                                                  logger)) {
+                                                  logger, fuse_count)) {
         fuse_count++;
         modified = true;
       }
@@ -505,10 +505,10 @@ present_key<---\----ScatterND <---------|-----(scatter_indices*)    |
                            output
 
 After Fusion:
- [q] [k] [v] [past_k] [past_v] [seqlens_k] [total_seq_len]
-  |   |   |    |        |        |          |
-  \   |   |    |        /        /          /
-   \  \   |    |      /         /         /
+ [q] [k] [v] [past_k] [past_v] [seqlens_k]
+  |   |   |    |        |        |
+  \   |   |    |        /        /
+   \  \   |    |      /         /
           GroupQueryAttention
           /         |       \
     present_k    output     present_v
@@ -520,7 +520,8 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
     const Node& softmax,
     std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
     GQAParameters& gqa_params,
-    const logging::Logger& logger) {
+    const logging::Logger& logger,
+    int fuse_count) {
   // path to output
   std::vector<graph_utils::EdgeEndToMatch> output_path{
       {0, 0, "Transpose", {1, 13, 21}, kOnnxDomain},
@@ -607,12 +608,14 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   // input list: [query, key, value, past_key, past_value, seqlens_k,
   // total_seq_len]
   ONNX_NAMESPACE::TensorProto total_seq_length;
-  total_seq_length.set_name("total_seq_len");
+  const std::string total_seq_length_name = "total_seq_len_tmp_" + std::to_string(fuse_count);
+  total_seq_length.set_name(total_seq_length_name);
   total_seq_length.add_dims(1);
   total_seq_length.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_INT32);
   total_seq_length.add_int32_data(
       static_cast<int32_t>(gqa_params.past_seq_length_));
   graph.AddInitializedTensor(total_seq_length);
+
   NodeArg* total_seq_len_node_arg =
       &graph.GetOrCreateNodeArg(total_seq_length.name(), nullptr);
 
@@ -631,7 +634,9 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
       graph.GetNode(scatterND_k.Index())
           ->MutableOutputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableOutputDefs()[0]};
-  Node& gqa_node = graph.AddNode("GroupQueryAttention", "GroupQueryAttention",
+
+  const std::string gqa_node_name = "FusedGroupQueryAttention_" + std::to_string(fuse_count);
+  Node& gqa_node = graph.AddNode(gqa_node_name, "GroupQueryAttention",
                                  "Fused GroupQueryAttention subgraphs",
                                  input_defs, output_defs, nullptr, kMSDomain);
   gqa_node.AddAttribute("num_heads", gqa_params.num_heads_);
