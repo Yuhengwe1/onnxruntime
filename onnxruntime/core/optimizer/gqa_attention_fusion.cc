@@ -199,8 +199,6 @@ bool MatchAndCheckAttentionBias(
   // path to visited 'Where'
   std::vector<graph_utils::EdgeEndToMatch> att_bias_path{
       {0, 1, "Where", {16}, kOnnxDomain},
-      {0, 0, "Cast", {9, 21}, kOnnxDomain},
-      {0, 0, "Cast", {9, 21}, kOnnxDomain},
       {0, 0, "Less", {13}, kOnnxDomain},
       {0, 1, "Transpose", {21}, kOnnxDomain},
       {0, 0, "Expand", {13}, kOnnxDomain},
@@ -214,26 +212,14 @@ bool MatchAndCheckAttentionBias(
   }
 
   const Node& where_att_bias = result[0]->GetNode();
-  const Node& cast_0 = result[1]->GetNode();
-  const Node& cast_1 = result[2]->GetNode();
-  const Node& less = result[3]->GetNode();
-  const Node& transpose = result[4]->GetNode();
-  const Node& expand = result[5]->GetNode();
-  const Node& add = result[6]->GetNode();
-  const Node& where_root = result[7]->GetNode();
+  const Node& less = result[1]->GetNode();
+  const Node& transpose = result[2]->GetNode();
+  const Node& expand = result[3]->GetNode();
+  const Node& add = result[4]->GetNode();
+  const Node& where_root = result[5]->GetNode();
 
   if (where_root.Index() != scatter_edges[4]->GetNode().Index()) {
     LOGS_DEFAULT(WARNING) << "where_root in att_bias should be scatter_pos";
-    return false;
-  }
-
-  if (*(cast_0.OutputDefs()[0]->Type()) != "tensor(bool)") {
-    LOGS_DEFAULT(WARNING) << "Cast 0 attribute to in att_bias not matched: " << *(cast_0.OutputDefs()[0]->Type());
-    return false;
-  }
-
-  if (*(cast_1.OutputDefs()[0]->Type()) != "tensor(uint8)") {
-    LOGS_DEFAULT(WARNING) << "Cast 1 attribute to in att_bias not matched: " << *(cast_1.OutputDefs()[0]->Type());
     return false;
   }
 
@@ -505,13 +491,18 @@ present_key<---\----ScatterND <---------|-----(scatter_indices*)    |
                            output
 
 After Fusion:
- [q] [k] [v] [past_k] [past_v] [seqlens_k]
-  |   |   |    |        |        |
-  \   |   |    |        /        /
-   \  \   |    |      /         /
-          GroupQueryAttention
-          /         |       \
-    present_k    output     present_v
+   [q] ─────────────────┐
+   [k] ───────────────┐ │
+   [v] ─────────────┐ │ │
+   [past_k] ───────┐│ │ │
+   [past_v] ─────┐ ││ │ │
+   [seqlens_k] ─┐│ ││ │ │
+                ││ ││ │ │
+                ▼▼ ▼▼ ▼ ▼
+         GroupedQueryAttention
+                ├──▶ [present_k]
+                ├──▶ [output]
+                └──▶ [present_v]
 */
 // clang-format on
 bool GroupQueryAttentionFusion::FuseSubGraph(

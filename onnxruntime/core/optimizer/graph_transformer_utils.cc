@@ -264,10 +264,7 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
       // shouldn't affect the end result - just easier to debug any issue if it's last.
       transformers.emplace_back(std::make_unique<TransposeOptimizer>(std::move(cpu_allocator)));
 
-      // run GroupQueryAttentionFusion for webnn workload
-      // const InlinedHashSet<std::string_view> gqa_fusion_eps = {onnxruntime::kCpuExecutionProvider,
-      //                                                          onnxruntime::kOpenVINOExecutionProvider,
-      //                                                          onnxruntime::kWebNNExecutionProvider};
+      // run GroupQueryAttentionFusion
       transformers.emplace_back(std::make_unique<GroupQueryAttentionFusion>());
     } break;
 
