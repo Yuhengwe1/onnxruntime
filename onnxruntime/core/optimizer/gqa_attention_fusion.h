@@ -20,20 +20,15 @@ class GroupQueryAttentionFusion : public GraphTransformer {
       : GraphTransformer("GroupQueryAttentionFusion",
                          compatible_execution_providers) {}
 
-  Status ApplyImpl(Graph& graph,
-                   bool& modified,
-                   int graph_level,
+  Status ApplyImpl(Graph& graph, bool& modified, int graph_level,
                    const logging::Logger& logger) const override;
 
  private:
   static bool FuseSubGraph(
-      Graph& graph,
-      const Node& qkv_matmul,
-      const Node& softmax,
+      Graph& graph, const Node& qkv_matmul, const Node& softmax,
       std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
-      GQAParameters& gqa_params,
-      const logging::Logger& logger,
-      int fuse_count);
+      std::vector<std::vector<const Node::EdgeEnd*>>& shared_scatter_indices,
+      GQAParameters& gqa_params, const logging::Logger& logger, int fuse_count);
 };
 
 }  // namespace onnxruntime

@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 #include "core/optimizer/gqa_attention_fusion.h"
+
 #include <cmath>
+
 #include "core/common/logging/logging.h"
 #include "core/framework/tensorprotoutils.h"
 #include "core/graph/constants.h"
@@ -24,8 +26,7 @@ struct GQAParameters {
 
 namespace {
 bool ValidateReshapeShape(
-    Graph& graph,
-    const NodeArg& reshape_shape,
+    Graph& graph, const NodeArg& reshape_shape,
     const std::initializer_list<int64_t>& expected_shape_values) {
   InlinedVector<int64_t> reshape_shape_temp;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, reshape_shape,
@@ -44,7 +45,21 @@ bool ValidateReshapeShape(
   return true;
 }
 
-void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<const Node>>& node_lists, const logging::Logger& logger) {
+bool CompareScatterIndicesEdges(
+    const std::vector<const Node::EdgeEnd*>& first,
+    const std::vector<const Node::EdgeEnd*>& second) {
+  // scatter indices edges guaranteed to have the same size
+  for (size_t i = 0; i < 6; ++i) {
+    if (first[i]->GetNode().Index() != second[i]->GetNode().Index()) {
+      return false;
+    }
+  }
+  return true;
+}
+
+void MatchKVExpand(const Node* start_node,
+                   std::vector<std::reference_wrapper<const Node>>& node_lists,
+                   const logging::Logger& logger) {
   if (start_node->OpType().compare("ScatterND") == 0) {
     node_lists.push_back(*start_node);
   } else if (start_node->OpType().compare("Reshape") == 0) {
@@ -54,8 +69,8 @@ void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<co
         {0, 0, "ScatterND", {13, 16, 18}, kOnnxDomain},
     };
     std::vector<const Node::EdgeEnd*> result;
-    if (!graph_utils::FindPath(*start_node, true, present_kv_expand_path, result,
-                               logger)) {
+    if (!graph_utils::FindPath(*start_node, true, present_kv_expand_path,
+                               result, logger)) {
       return;
     }
     node_lists.push_back(*start_node);
@@ -65,10 +80,8 @@ void MatchKVExpand(const Node* start_node, std::vector<std::reference_wrapper<co
   }
 }
 
-bool CheckNodesInOutputPath(Graph& graph,
-                            const Node& reshape,
-                            const Node& transpose,
-                            GQAParameters& gqa_params) {
+bool CheckNodesInOutputPath(Graph& graph, const Node& reshape,
+                            const Node& transpose, GQAParameters& gqa_params) {
   if (!optimizer_utils::CheckOutputEdges(graph, transpose, 1)) {
     LOGS_DEFAULT(WARNING) << "Output edge count not expected for Transpose in "
                              "output path, expected 1, got "
@@ -112,11 +125,8 @@ scatter_indices_left_constant             scatter_indices_right_constant        
 */
 // clang-format on
 bool MatchAndCheckScatterIndicesCalculation(
-    Graph& graph,
-    const Node& scatterND,
-    const GQAParameters& gqa_params,
-    std::vector<const Node::EdgeEnd*>& result,
-    const logging::Logger logger) {
+    Graph& graph, const Node& scatterND, const GQAParameters& gqa_params,
+    std::vector<const Node::EdgeEnd*>& result, const logging::Logger logger) {
   LOGS_DEFAULT(WARNING) << "Start MatchAndCheckScatterIndicesCalculation";
   // path to seq_length_k
   std::vector<graph_utils::EdgeEndToMatch> scatter_indices_path{
@@ -136,9 +146,11 @@ bool MatchAndCheckScatterIndicesCalculation(
   const Node& add = result[3]->GetNode();
   const Node& where = result[4]->GetNode();
 
-  if (!optimizer_utils::IsAttributeWithExpectedValue(cast, "to",
-                                                     static_cast<int64_t>(ONNX_NAMESPACE::TensorProto_DataType_INT64))) {
-    LOGS_DEFAULT(WARNING) << "Cast attribute to in scatter indices calculation not matched";
+  if (!optimizer_utils::IsAttributeWithExpectedValue(
+          cast, "to",
+          static_cast<int64_t>(ONNX_NAMESPACE::TensorProto_DataType_INT64))) {
+    LOGS_DEFAULT(WARNING)
+        << "Cast attribute to in scatter indices calculation not matched";
     return false;
   }
 
@@ -160,7 +172,8 @@ bool MatchAndCheckScatterIndicesCalculation(
 
   int32_t where_scatter_idx_input_x_data;
   if (!optimizer_utils::GetScalarInitializerValue(
-          graph, *(where.InputDefs()[1]), where_scatter_idx_input_x_data, true) ||
+          graph, *(where.InputDefs()[1]), where_scatter_idx_input_x_data,
+          true) ||
       where_scatter_idx_input_x_data != 0) {
     LOGS_DEFAULT(WARNING) << "Where input x data not matched";
     return false;
@@ -181,20 +194,14 @@ ones_array (shape=B,N,S,P)                                  range_of_qkv_sequenc
                                           |
                                 1 ---> Where <--- finfo_min (minimum value of FP32)
                                           |
-                                        Cast?
-                                          |
-                                        Cast?
-                                          |
                                     attention_bias
 */
 // clang-format on
 bool MatchAndCheckAttentionBias(
-    Graph& graph,
-    const Node& add_before_softmax,
+    Graph& graph, const Node& add_before_softmax,
     const GQAParameters& gqa_params,
     const std::vector<const Node::EdgeEnd*>& scatter_edges,
-    std::vector<const Node::EdgeEnd*>& result,
-    const logging::Logger logger) {
+    std::vector<const Node::EdgeEnd*>& result, const logging::Logger logger) {
   LOGS_DEFAULT(WARNING) << "Start MatchAndCheckAttentionBias";
   // path to visited 'Where'
   std::vector<graph_utils::EdgeEndToMatch> att_bias_path{
@@ -265,13 +272,12 @@ bool MatchAndCheckAttentionBias(
   return true;
 }
 
-bool MatchAndCheckQK(Graph& graph,
-                     const Node& add_before_softmax,
-                     GQAParameters& gqa_params,
-                     const std::vector<const Node::EdgeEnd*>& scatter_edges,
-                     std::vector<const Node::EdgeEnd*>& q_edges,
-                     std::vector<std::reference_wrapper<const Node>>& present_k_nodes,
-                     const logging::Logger logger) {
+bool MatchAndCheckQK(
+    Graph& graph, const Node& add_before_softmax, GQAParameters& gqa_params,
+    const std::vector<const Node::EdgeEnd*>& scatter_edges,
+    std::vector<const Node::EdgeEnd*>& q_edges,
+    std::vector<std::reference_wrapper<const Node>>& present_k_nodes,
+    const logging::Logger logger) {
   LOGS_DEFAULT(WARNING) << "Start match Q*K subgraph";
   // path to input query
   std::vector<graph_utils::EdgeEndToMatch> q_input_path{
@@ -317,12 +323,14 @@ bool MatchAndCheckQK(Graph& graph,
 
   // path to input key
   const Node* maybe_k_transpose = graph_utils::GetInputNode(qk_matmul, 1);
-  if (maybe_k_transpose == nullptr || maybe_k_transpose->OpType().compare("Transpose") != 0) {
+  if (maybe_k_transpose == nullptr ||
+      maybe_k_transpose->OpType().compare("Transpose") != 0) {
     LOGS_DEFAULT(WARNING) << "qk_matmul input[1] mismatch";
     return false;
   }
 
-  const Node* k_transpose_input = graph_utils::GetInputNode(*maybe_k_transpose, 0);
+  const Node* k_transpose_input =
+      graph_utils::GetInputNode(*maybe_k_transpose, 0);
   if (k_transpose_input == nullptr) {
     LOGS_DEFAULT(WARNING) << "empty k_transpose input";
     return false;
@@ -337,7 +345,8 @@ bool MatchAndCheckQK(Graph& graph,
 
   const Node& scatterND_k = present_k_scatternd_nodes.back();
   const Node* maybe_k_reshape = graph_utils::GetInputNode(scatterND_k, 2);
-  if (maybe_k_reshape == nullptr || maybe_k_reshape->OpType().compare("Reshape") != 0) {
+  if (maybe_k_reshape == nullptr ||
+      maybe_k_reshape->OpType().compare("Reshape") != 0) {
     LOGS_DEFAULT(WARNING) << "scatterND_k input[2] mismatch";
     return false;
   }
@@ -358,9 +367,10 @@ bool MatchAndCheckQK(Graph& graph,
     return false;
   }
 
-  if (!ValidateReshapeShape(graph, *(maybe_k_reshape->InputDefs()[1]),
-                            {gqa_params.batch_size_, gqa_params.seq_length_,
-                             gqa_params.kv_num_heads_, gqa_params.head_size_})) {
+  if (!ValidateReshapeShape(
+          graph, *(maybe_k_reshape->InputDefs()[1]),
+          {gqa_params.batch_size_, gqa_params.seq_length_,
+           gqa_params.kv_num_heads_, gqa_params.head_size_})) {
     LOGS_DEFAULT(WARNING) << "K_reshape shape not matched";
     return false;
   }
@@ -376,7 +386,8 @@ bool MatchAndCheckQK(Graph& graph,
   }
 
   present_k_nodes.push_back(*maybe_k_transpose);
-  present_k_nodes.insert(present_k_nodes.end(), present_k_scatternd_nodes.begin(),
+  present_k_nodes.insert(present_k_nodes.end(),
+                         present_k_scatternd_nodes.begin(),
                          present_k_scatternd_nodes.end());
   present_k_nodes.push_back(*maybe_k_reshape);
 
@@ -385,18 +396,16 @@ bool MatchAndCheckQK(Graph& graph,
 }  // namespace
 
 Status GroupQueryAttentionFusion::ApplyImpl(
-    Graph& graph,
-    bool& modified,
-    int graph_level,
+    Graph& graph, bool& modified, int graph_level,
     const logging::Logger& logger) const {
   GraphViewer graph_viewer(graph);
   const auto& node_topology_list = graph_viewer.GetNodesInTopologicalOrder();
 
   int fuse_count = 0;
+  std::vector<std::vector<const Node::EdgeEnd*>> shared_scatter_indices;
   for (auto node_idx : node_topology_list) {
     auto node_ptr = graph.GetNode(node_idx);
-    if (node_ptr == nullptr)
-      continue;
+    if (node_ptr == nullptr) continue;
 
     Node& node = *node_ptr;
     ORT_RETURN_IF_ERROR(Recurse(node, modified, graph_level, logger));
@@ -433,12 +442,29 @@ Status GroupQueryAttentionFusion::ApplyImpl(
           matmul_input_1_shape.Shape()->dim(2).dim_value();
       gqa_params.head_size_ = matmul_input_1_shape.Shape()->dim(3).dim_value();
 
-      if (GroupQueryAttentionFusion::FuseSubGraph(graph, node, *matmul_input_0,
-                                                  present_v_nodes, gqa_params,
-                                                  logger, fuse_count)) {
+      if (GroupQueryAttentionFusion::FuseSubGraph(
+              graph, node, *matmul_input_0, present_v_nodes,
+              shared_scatter_indices, gqa_params, logger, fuse_count)) {
         fuse_count++;
         modified = true;
       }
+    }
+  }
+  // remove shared scatter indices subgraph
+  if (fuse_count > 1 && !shared_scatter_indices.empty()) {
+    std::set<NodeIndex> scatter_nodes_to_remove;
+
+    for (const auto& scatter_indices : shared_scatter_indices) {
+      std::transform(
+          scatter_indices.begin(), scatter_indices.end(),
+          std::inserter(scatter_nodes_to_remove, scatter_nodes_to_remove.end()),
+          [](const Node::EdgeEnd* edge) { return edge->GetNode().Index(); });
+    }
+
+    for (const auto& node_index : scatter_nodes_to_remove) {
+      Node* node = graph.GetNode(node_index);
+      graph_utils::RemoveNodeOutputEdges(graph, *node);
+      graph.RemoveNode(node->Index());
     }
   }
 
@@ -506,13 +532,10 @@ After Fusion:
 */
 // clang-format on
 bool GroupQueryAttentionFusion::FuseSubGraph(
-    Graph& graph,
-    const Node& qkv_matmul,
-    const Node& softmax,
+    Graph& graph, const Node& qkv_matmul, const Node& softmax,
     std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
-    GQAParameters& gqa_params,
-    const logging::Logger& logger,
-    int fuse_count) {
+    std::vector<std::vector<const Node::EdgeEnd*>>& shared_scatter_indices,
+    GQAParameters& gqa_params, const logging::Logger& logger, int fuse_count) {
   // path to output
   std::vector<graph_utils::EdgeEndToMatch> output_path{
       {0, 0, "Transpose", {1, 13, 21}, kOnnxDomain},
@@ -599,7 +622,8 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   // input list: [query, key, value, past_key, past_value, seqlens_k,
   // total_seq_len]
   ONNX_NAMESPACE::TensorProto total_seq_length;
-  const std::string total_seq_length_name = "total_seq_len_tmp_" + std::to_string(fuse_count);
+  const std::string total_seq_length_name =
+      "total_seq_len_tmp_" + std::to_string(fuse_count);
   total_seq_length.set_name(total_seq_length_name);
   total_seq_length.add_dims(1);
   total_seq_length.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_INT32);
@@ -612,21 +636,24 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
 
   const Node& scatterND_k = present_k_nodes[present_k_nodes.size() - 2].get();
   const std::array input_defs{
-      graph.GetNode(query_input_edges[3]->GetNode().Index())->MutableInputDefs()[0],
-      graph.GetNode(present_k_nodes.back().get().Index())->MutableInputDefs()[0],
+      graph.GetNode(query_input_edges[3]->GetNode().Index())
+          ->MutableInputDefs()[0],
+      graph.GetNode(present_k_nodes.back().get().Index())
+          ->MutableInputDefs()[0],
       graph.GetNode(maybe_reshape->Index())->MutableInputDefs()[0],
       graph.GetNode(scatterND_k.Index())->MutableInputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableInputDefs()[0],
-      graph.GetNode(scatter_indices_edges[4]->GetNode().Index())->MutableInputDefs()[2],
+      graph.GetNode(scatter_indices_edges[4]->GetNode().Index())
+          ->MutableInputDefs()[2],
       total_seq_len_node_arg};
   // output list: [output, present_key, present_value]
   const std::array output_defs{
       graph.GetNode(output_edges[1]->GetNode().Index())->MutableOutputDefs()[0],
-      graph.GetNode(scatterND_k.Index())
-          ->MutableOutputDefs()[0],
+      graph.GetNode(scatterND_k.Index())->MutableOutputDefs()[0],
       graph.GetNode(scatterND_v.Index())->MutableOutputDefs()[0]};
 
-  const std::string gqa_node_name = "FusedGroupQueryAttention_" + std::to_string(fuse_count);
+  const std::string gqa_node_name =
+      "FusedGroupQueryAttention_" + std::to_string(fuse_count);
   Node& gqa_node = graph.AddNode(gqa_node_name, "GroupQueryAttention",
                                  "Fused GroupQueryAttention subgraphs",
                                  input_defs, output_defs, nullptr, kMSDomain);
@@ -654,6 +681,20 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
       [](std::reference_wrapper<const Node> node_ref_wrapper) -> NodeIndex {
         return node_ref_wrapper.get().Index();
       });
+
+  // remove scatter indices subgraph only if it is not used by other nodes
+  bool is_orphan_scatter_indices = optimizer_utils::CheckOutputEdges(
+      graph, scatter_indices_edges[0]->GetNode(), 2);
+  if (!is_orphan_scatter_indices &&
+      !std::any_of(
+          shared_scatter_indices.begin(), shared_scatter_indices.end(),
+          [&](const std::vector<const Node::EdgeEnd*>& scatter_indices) {
+            return CompareScatterIndicesEdges(scatter_indices,
+                                              scatter_indices_edges);
+          })) {
+    shared_scatter_indices.push_back(scatter_indices_edges);
+  }
+
   auto append_to_remove_list_from_edge =
       [&](std::vector<const Node::EdgeEnd*> edges) {
         std::transform(
@@ -662,11 +703,14 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
             [](const Node::EdgeEnd* edge) { return edge->GetNode().Index(); });
       };
   append_to_remove_list_from_edge(output_edges);
-  append_to_remove_list_from_edge(scatter_indices_edges);
+  if (is_orphan_scatter_indices) {
+    append_to_remove_list_from_edge(scatter_indices_edges);
+  }
   append_to_remove_list_from_edge(attention_bias_edges);
   append_to_remove_list_from_edge(query_input_edges);
 
-  LOGS_DEFAULT(WARNING) << "nodes_to_remove set size: " << nodes_to_remove.size();
+  LOGS_DEFAULT(WARNING) << "nodes_to_remove set size: "
+                        << nodes_to_remove.size();
 
   for (const auto& node_index : nodes_to_remove) {
     Node* node = graph.GetNode(node_index);
