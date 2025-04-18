@@ -209,8 +209,7 @@ bool MatchAndCheckAttentionBias(
       {0, 0, "Less", {13}, kOnnxDomain},
       {0, 1, "Transpose", {21}, kOnnxDomain},
       {0, 0, "Expand", {13}, kOnnxDomain},
-      {0, 0, "Add", {14}, kOnnxDomain},
-      {0, 1, "Where", {16}, kOnnxDomain}};
+      {0, 0, "Add", {14}, kOnnxDomain}};
 
   if (!graph_utils::FindPath(add_before_softmax, true, att_bias_path, result,
                              logger)) {
