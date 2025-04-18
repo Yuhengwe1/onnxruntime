@@ -223,10 +223,11 @@ bool MatchAndCheckAttentionBias(
   const Node& transpose = result[2]->GetNode();
   const Node& expand = result[3]->GetNode();
   const Node& add = result[4]->GetNode();
-  const Node& where_root = result[5]->GetNode();
 
-  if (where_root.Index() != scatter_edges[4]->GetNode().Index()) {
-    LOGS_DEFAULT(WARNING) << "where_root in att_bias should be scatter_pos";
+  if (graph_utils::GetInputNode(add, 1)->Index() !=
+      scatter_edges[4]->GetNode().Index()) {
+    LOGS_DEFAULT(WARNING) << "add's second input should be where node in "
+                             "scatter indices subgraph";
     return false;
   }
 
