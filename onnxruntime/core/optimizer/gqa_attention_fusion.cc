@@ -45,9 +45,9 @@ bool ValidateReshapeShape(
   return true;
 }
 
-bool CompareScatterIndicesEdges(const std::vector<const Node::EdgeEnd*>& first,
-                                const std::vector<const Node::EdgeEnd*>& second,
-                                const int expected_size) {
+bool CompareEdges(const std::vector<const Node::EdgeEnd*>& first,
+                  const std::vector<const Node::EdgeEnd*>& second,
+                  const int expected_size) {
   // scatter indices edges guaranteed to have the same size
   for (int i = 0; i < expected_size; ++i) {
     if (first[i]->GetNode().Index() != second[i]->GetNode().Index()) {
@@ -459,25 +459,6 @@ Status GroupQueryAttentionFusion::ApplyImpl(
       }
     }
   }
-  // remove shared subgraph
-  if (fuse_count > 1 &&
-      !(shared_scatter_indices.empty() && shared_attention_bias.empty())) {
-    std::set<NodeIndex> shared_nodes_to_remove;
-
-    for (const auto& scatter_indices : shared_scatter_indices) {
-      AppendRemoveSetFromEdges(shared_nodes_to_remove, scatter_indices);
-    }
-
-    for (const auto& attention_bias : shared_attention_bias) {
-      AppendRemoveSetFromEdges(shared_nodes_to_remove, attention_bias);
-    }
-
-    for (const auto& node_index : shared_nodes_to_remove) {
-      Node* node = graph.GetNode(node_index);
-      graph_utils::RemoveNodeOutputEdges(graph, *node);
-      graph.RemoveNode(node->Index());
-    }
-  }
 
   LOGS_DEFAULT(WARNING) << "Total fused GroupQueryAttention node count: "
                         << fuse_count;
@@ -701,9 +682,8 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
       !std::any_of(
           shared_scatter_indices.begin(), shared_scatter_indices.end(),
           [&](const std::vector<const Node::EdgeEnd*>& scatter_indices) {
-            return CompareScatterIndicesEdges(scatter_indices,
-                                              scatter_indices_edges,
-                                              /*expected_size=*/6);
+            return CompareEdges(scatter_indices, scatter_indices_edges,
+                                /*expected_size=*/5);
           })) {
     shared_scatter_indices.push_back(scatter_indices_edges);
   }
@@ -714,9 +694,8 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
       !std::any_of(
           shared_attention_bias.begin(), shared_attention_bias.end(),
           [&](const std::vector<const Node::EdgeEnd*>& attention_bias) {
-            return CompareScatterIndicesEdges(attention_bias,
-                                              attention_bias_edges,
-                                              /*expected_size=*/5);
+            return CompareEdges(attention_bias, attention_bias_edges,
+                                /*expected_size=*/5);
           })) {
     shared_attention_bias.push_back(attention_bias_edges);
   }
@@ -726,7 +705,7 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
   if (is_orphan_scatter_indices) {
     AppendRemoveSetFromEdges(nodes_to_remove, scatter_indices_edges);
   }
-  if (!is_orphan_attention_bias) {
+  if (is_orphan_attention_bias) {
     AppendRemoveSetFromEdges(nodes_to_remove, attention_bias_edges);
   }
 
