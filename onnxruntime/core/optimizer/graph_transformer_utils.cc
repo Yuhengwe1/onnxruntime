@@ -45,6 +45,7 @@
 #include "core/optimizer/gemm_activation_fusion.h"
 #include "core/optimizer/gemm_sum_fusion.h"
 #include "core/optimizer/gemm_transpose_fusion.h"
+#include "core/optimizer/gqa_attention_fusion.h"
 #include "core/optimizer/group_query_attention_fusion.h"
 #include "core/optimizer/identical_children_consolidation.h"
 #include "core/optimizer/identity_elimination.h"
@@ -262,6 +263,9 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
       // run TransposeOptimizer last as it works in a slightly different way by moving Transpose nodes around.
       // shouldn't affect the end result - just easier to debug any issue if it's last.
       transformers.emplace_back(std::make_unique<TransposeOptimizer>(std::move(cpu_allocator)));
+
+      // run GroupQueryAttentionFusion
+      transformers.emplace_back(std::make_unique<GroupQueryAttentionFusion>());
     } break;
 
     case TransformerLevel::Level2: {
@@ -356,7 +360,7 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
       transformers.emplace_back(std::make_unique<MatmulTransposeFusion>(cpu_cuda_dml_rocm_eps));
       transformers.emplace_back(std::make_unique<BiasGeluFusion>(cpu_acl_cuda_dml_rocm_eps));
 
-      transformers.emplace_back(std::make_unique<GroupQueryAttentionFusion>(cuda_eps));
+      transformers.emplace_back(std::make_unique<GroupQueryAttentionInputFusion>(cuda_eps));
 
       transformers.emplace_back(std::make_unique<SkipLayerNormFusion>(cpu_acl_cuda_dml_rocm_eps));
 

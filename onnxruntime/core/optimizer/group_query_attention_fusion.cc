@@ -276,7 +276,7 @@ static void FusePreGQANodes(Graph& graph, Node* q_node, Node* k_node, Node* v_no
   new_node_output_defs.assign(output_defs.begin(), output_defs.end());
 }
 
-Status GroupQueryAttentionFusion::ApplyImpl(
+Status GroupQueryAttentionInputFusion::ApplyImpl(
     Graph& graph,
     bool& modified,
     int graph_level,

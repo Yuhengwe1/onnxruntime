@@ -10,10 +10,10 @@ namespace onnxruntime {
 /**
 @Class GroupQueryAttention
 */
-class GroupQueryAttentionFusion : public GraphTransformer {
+class GroupQueryAttentionInputFusion : public GraphTransformer {
  public:
-  explicit GroupQueryAttentionFusion(const InlinedHashSet<std::string_view>& compatible_execution_providers = {}) noexcept
-      : GraphTransformer("GroupQueryAttentionFusion", compatible_execution_providers) {
+  explicit GroupQueryAttentionInputFusion(const InlinedHashSet<std::string_view>& compatible_execution_providers = {}) noexcept
+      : GraphTransformer("GroupQueryAttentionInputFusion", compatible_execution_providers) {
   }
 
   Status ApplyImpl(Graph& graph, bool& modified, int graph_level, const logging::Logger& logger) const override;
