@@ -28,6 +28,7 @@ class GroupQueryAttentionFusion : public GraphTransformer {
       Graph& graph, const Node& qkv_matmul, const Node& softmax,
       std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
       std::vector<std::vector<const Node::EdgeEnd*>>& shared_scatter_indices,
+      std::vector<std::vector<const Node::EdgeEnd*>>& shared_attention_bias,
       GQAParameters& gqa_params, const logging::Logger& logger, int fuse_count);
 };
 

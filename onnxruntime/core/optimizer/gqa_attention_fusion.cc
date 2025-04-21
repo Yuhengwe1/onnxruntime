@@ -45,16 +45,23 @@ bool ValidateReshapeShape(
   return true;
 }
 
-bool CompareScatterIndicesEdges(
-    const std::vector<const Node::EdgeEnd*>& first,
-    const std::vector<const Node::EdgeEnd*>& second) {
+bool CompareScatterIndicesEdges(const std::vector<const Node::EdgeEnd*>& first,
+                                const std::vector<const Node::EdgeEnd*>& second,
+                                const int expected_size) {
   // scatter indices edges guaranteed to have the same size
-  for (size_t i = 0; i < 6; ++i) {
+  for (int i = 0; i < expected_size; ++i) {
     if (first[i]->GetNode().Index() != second[i]->GetNode().Index()) {
       return false;
     }
   }
   return true;
+}
+
+void AppendRemoveSetFromEdges(std::set<NodeIndex>& remove_set,
+                              const std::vector<const Node::EdgeEnd*>& edges) {
+  std::transform(
+      edges.begin(), edges.end(), std::inserter(remove_set, remove_set.end()),
+      [](const Node::EdgeEnd* edge) { return edge->GetNode().Index(); });
 }
 
 void MatchKVExpand(const Node* start_node,
@@ -403,6 +410,7 @@ Status GroupQueryAttentionFusion::ApplyImpl(
 
   int fuse_count = 0;
   std::vector<std::vector<const Node::EdgeEnd*>> shared_scatter_indices;
+  std::vector<std::vector<const Node::EdgeEnd*>> shared_attention_bias;
   for (auto node_idx : node_topology_list) {
     auto node_ptr = graph.GetNode(node_idx);
     if (node_ptr == nullptr) continue;
@@ -444,24 +452,27 @@ Status GroupQueryAttentionFusion::ApplyImpl(
 
       if (GroupQueryAttentionFusion::FuseSubGraph(
               graph, node, *matmul_input_0, present_v_nodes,
-              shared_scatter_indices, gqa_params, logger, fuse_count)) {
+              shared_scatter_indices, shared_attention_bias, gqa_params, logger,
+              fuse_count)) {
         fuse_count++;
         modified = true;
       }
     }
   }
-  // remove shared scatter indices subgraph
-  if (fuse_count > 1 && !shared_scatter_indices.empty()) {
-    std::set<NodeIndex> scatter_nodes_to_remove;
+  // remove shared subgraph
+  if (fuse_count > 1 &&
+      !(shared_scatter_indices.empty() && shared_attention_bias.empty())) {
+    std::set<NodeIndex> shared_nodes_to_remove;
 
     for (const auto& scatter_indices : shared_scatter_indices) {
-      std::transform(
-          scatter_indices.begin(), scatter_indices.end(),
-          std::inserter(scatter_nodes_to_remove, scatter_nodes_to_remove.end()),
-          [](const Node::EdgeEnd* edge) { return edge->GetNode().Index(); });
+      AppendRemoveSetFromEdges(shared_nodes_to_remove, scatter_indices);
     }
 
-    for (const auto& node_index : scatter_nodes_to_remove) {
+    for (const auto& attention_bias : shared_attention_bias) {
+      AppendRemoveSetFromEdges(shared_nodes_to_remove, attention_bias);
+    }
+
+    for (const auto& node_index : shared_nodes_to_remove) {
       Node* node = graph.GetNode(node_index);
       graph_utils::RemoveNodeOutputEdges(graph, *node);
       graph.RemoveNode(node->Index());
@@ -535,6 +546,7 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
     Graph& graph, const Node& qkv_matmul, const Node& softmax,
     std::vector<std::reference_wrapper<const Node>>& present_v_nodes,
     std::vector<std::vector<const Node::EdgeEnd*>>& shared_scatter_indices,
+    std::vector<std::vector<const Node::EdgeEnd*>>& shared_attention_bias,
     GQAParameters& gqa_params, const logging::Logger& logger, int fuse_count) {
   // path to output
   std::vector<graph_utils::EdgeEndToMatch> output_path{
@@ -690,24 +702,33 @@ bool GroupQueryAttentionFusion::FuseSubGraph(
           shared_scatter_indices.begin(), shared_scatter_indices.end(),
           [&](const std::vector<const Node::EdgeEnd*>& scatter_indices) {
             return CompareScatterIndicesEdges(scatter_indices,
-                                              scatter_indices_edges);
+                                              scatter_indices_edges,
+                                              /*expected_size=*/6);
           })) {
     shared_scatter_indices.push_back(scatter_indices_edges);
   }
-
-  auto append_to_remove_list_from_edge =
-      [&](std::vector<const Node::EdgeEnd*> edges) {
-        std::transform(
-            edges.begin(), edges.end(),
-            std::inserter(nodes_to_remove, nodes_to_remove.end()),
-            [](const Node::EdgeEnd* edge) { return edge->GetNode().Index(); });
-      };
-  append_to_remove_list_from_edge(output_edges);
-  if (is_orphan_scatter_indices) {
-    append_to_remove_list_from_edge(scatter_indices_edges);
+  // remove attention bias subgraph only if it is not used by other nodes
+  bool is_orphan_attention_bias = optimizer_utils::CheckOutputEdges(
+      graph, attention_bias_edges[0]->GetNode(), 1);
+  if (!is_orphan_attention_bias &&
+      !std::any_of(
+          shared_attention_bias.begin(), shared_attention_bias.end(),
+          [&](const std::vector<const Node::EdgeEnd*>& attention_bias) {
+            return CompareScatterIndicesEdges(attention_bias,
+                                              attention_bias_edges,
+                                              /*expected_size=*/5);
+          })) {
+    shared_attention_bias.push_back(attention_bias_edges);
   }
-  append_to_remove_list_from_edge(attention_bias_edges);
-  append_to_remove_list_from_edge(query_input_edges);
+
+  AppendRemoveSetFromEdges(nodes_to_remove, output_edges);
+  AppendRemoveSetFromEdges(nodes_to_remove, query_input_edges);
+  if (is_orphan_scatter_indices) {
+    AppendRemoveSetFromEdges(nodes_to_remove, scatter_indices_edges);
+  }
+  if (!is_orphan_attention_bias) {
+    AppendRemoveSetFromEdges(nodes_to_remove, attention_bias_edges);
+  }
 
   LOGS_DEFAULT(WARNING) << "nodes_to_remove set size: "
                         << nodes_to_remove.size();
